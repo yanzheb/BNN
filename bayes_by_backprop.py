@@ -9,7 +9,8 @@ from torchvision import datasets, transforms
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import List
+from typing import List, Tuple
+sns.set(style="whitegrid")
 
 
 @dataclass
@@ -27,8 +28,8 @@ class DistConstant:
     init_mu = (-0.2, 0.2)
     init_rho = (-5, -4)
     mixture_scale = 0.5
-    sigma1 = torch.tensor([math.exp(-0)])
-    sigma2 = torch.tensor([math.exp(-6)])
+    sigma1 = torch.tensor([math.exp(-0)]).to(Constant.device)
+    sigma2 = torch.tensor([math.exp(-6)]).to(Constant.device)
 
 
 class Gaussian:
@@ -59,7 +60,7 @@ class Gaussian:
 
     def _epsilon(self):
         """Epsilon is point-wise multiplied with sigma, therefore it must be of the same size as sigma."""
-        return self._normal.sample(self._rho.size())
+        return self._normal.sample(self._rho.size()).to(Constant.device)
 
     def sample(self):
         """Sampling weights."""
@@ -72,7 +73,7 @@ class Gaussian:
 
         :param input_: The input to the pdf.
         """
-        two_pi = torch.empty(self._rho.size()).fill_(2 * math.pi)
+        two_pi = torch.empty(self._rho.size()).fill_(2 * math.pi).to(Constant.device)
 
         p1 = torch.log(torch.sqrt(two_pi))
         p2 = torch.log(self._sigma())
@@ -121,7 +122,7 @@ class BayesianLinear(torch.nn.Module):
         # mu
         weight_mu = torch.empty(output_size, input_size).uniform_(DistConstant.init_mu[0], DistConstant.init_mu[1])
         self.weight_mu = torch.nn.Parameter(weight_mu)
-        # rho
+        # rho_pi
         weight_rho = torch.empty(output_size, input_size).uniform_(DistConstant.init_rho[0], DistConstant.init_rho[1])
         self.weight_rho = torch.nn.Parameter(weight_rho)
         # Initialize the weights to gaussian variational posteriors
@@ -156,12 +157,12 @@ class BayesianLinear(torch.nn.Module):
         else:
             self.log_prior, self.log_variational_posterior = 0, 0
 
-        return F.linear(input_, weight, bias)
+        return F.linear(input_.to(Constant.device), weight, bias)
 
 
 class BayesianNetwork(torch.nn.Module):
     def __init__(self):
-        super().__init__()
+        super(BayesianNetwork, self).__init__()
         self.l1 = BayesianLinear(28 * 28, 400)
         self.l2 = BayesianLinear(400, 400)
         self.l3 = BayesianLinear(400, 10)
@@ -195,7 +196,7 @@ class BayesianNetwork(torch.nn.Module):
 
         log_prior = log_priors.mean()
         log_variational_posterior = log_variational_posteriors.mean()
-        negative_log_likelihood = F.nll_loss(outputs.mean(0), target, size_average=False)
+        negative_log_likelihood = F.nll_loss(outputs.mean(0), target.to(Constant.device), size_average=False)
 
         loss = (log_variational_posterior - log_prior) / num_batches + negative_log_likelihood
         return loss, log_prior, log_variational_posterior, negative_log_likelihood
@@ -226,23 +227,19 @@ def train(net, optimizer, train_loader):
     return losses
 
 
-def load_data():
+def load_data() -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """
-    Load the Mnist fashion data set from drive, if not present, it will download it from  the internet.
+    Load the MNIST data set from drive, if not present, it will download it from  the internet.
 
     :return: A tuple where the first item is the training set, and the second is the test set.
     """
-    train_loader = torch.utils.data.DataLoader(
-        datasets.FashionMNIST(
-            './fmnist', train=True, download=True,
-            transform=transforms.ToTensor()),
-        batch_size=Constant.batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(
-        datasets.FashionMNIST(
-            './fmnist', train=False, download=True,
-            transform=transforms.ToTensor()),
-        batch_size=Constant.test_batch_size, shuffle=False)
 
+    train_loader = torch.utils.data.DataLoader(datasets.MNIST('./mnist', train=True, download=True,
+                                                              transform=transforms.ToTensor()),
+                                               batch_size=Constant.batch_size, shuffle=True)
+    test_loader = torch.utils.data.DataLoader(datasets.MNIST('./mnist', train=False, download=True,
+                                                             transform=transforms.ToTensor()),
+                                              batch_size=Constant.test_batch_size, shuffle=False)
     return train_loader, test_loader
 
 
@@ -263,19 +260,32 @@ def make_plots(losses: List[List[float]]) -> None:
     plt.show()
 
 
-def main():
+def training_procedure() -> None:
+    """Run the training procedure epochs number of times."""
+    # Load data
     train_loader, test_loader = load_data()
+
+    # Set up a bayesian neural network
     net = BayesianNetwork().to(Constant.device)
+
+    # Set up optimizer
     optimizer = optim.Adam(net.parameters())
+
     losses_epoch = [[], [], [], []]
 
-    for epoch in range(Constant.train_epochs):
+    # Run training session for Constant.train_epochs number of epochs
+    for _ in range(Constant.train_epochs):
         losses = train(net, optimizer, train_loader)
 
         for i in range(len(losses_epoch)):
             losses_epoch[i] += losses[i]
 
+    # Make plot of the different components of the elbo
     make_plots(losses_epoch)
+
+
+def main() -> None:
+    training_procedure()
 
 
 if __name__ == '__main__':
