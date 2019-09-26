@@ -9,6 +9,7 @@ from torchvision import datasets, transforms
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from typing import List
 
 
 @dataclass
@@ -201,6 +202,14 @@ class BayesianNetwork(torch.nn.Module):
 
 
 def train(net, optimizer, train_loader):
+    """
+    Train the given Bayesian network using th given optimizer and training data.
+
+    :param net: a bayesian neural network.
+    :param optimizer: a optimizer from the Pytorch library.
+    :param train_loader: training set, the Pytorch preferred format.
+    :return: List of numerical values that form the elbo.
+    """
     losses = [[], [], [], []]
     net.train()
 
@@ -218,7 +227,11 @@ def train(net, optimizer, train_loader):
 
 
 def load_data():
-    """Load the Mnist fashion data set from drive, if not present, it will download from internet."""
+    """
+    Load the Mnist fashion data set from drive, if not present, it will download it from  the internet.
+
+    :return: A tuple where the first item is the training set, and the second is the test set.
+    """
     train_loader = torch.utils.data.DataLoader(
         datasets.FashionMNIST(
             './fmnist', train=True, download=True,
@@ -233,25 +246,36 @@ def load_data():
     return train_loader, test_loader
 
 
+def make_plots(losses: List[List[float]]) -> None:
+    """
+    Take in numerical values and makes plots out of it.
+
+    :param losses: Consists of the loss, log prior, log variational posterior and negative log likelihood.
+    """
+    fig, ax = plt.subplots(2, 2)
+
+    sns.lineplot(data=pd.DataFrame({'loss': losses[0]}), ax=ax[0, 0])
+    sns.lineplot(data=pd.DataFrame({'log prior': losses[1]}), palette="tab10", linewidth=2.5, ax=ax[0, 1])
+    sns.lineplot(data=pd.DataFrame({'log variational_posterior': losses[2]}), palette="tab10", linewidth=2.5,
+                 ax=ax[1, 0])
+    sns.lineplot(data=pd.DataFrame({'negative log likelihood': losses[3]}), palette="tab10", linewidth=2.5, ax=ax[1, 1])
+
+    plt.show()
+
+
 def main():
     train_loader, test_loader = load_data()
     net = BayesianNetwork().to(Constant.device)
     optimizer = optim.Adam(net.parameters())
     losses_epoch = [[], [], [], []]
+
     for epoch in range(Constant.train_epochs):
         losses = train(net, optimizer, train_loader)
 
         for i in range(len(losses_epoch)):
             losses_epoch[i] += losses[i]
 
-    fig, ax = plt.subplots(2, 2)
-
-    sns.lineplot(data=pd.DataFrame({'loss': losses_epoch[0]}), ax=ax[0, 0])
-    sns.lineplot(data=pd.DataFrame({'log prior': losses_epoch[1]}), palette="tab10", linewidth=2.5, ax=ax[0, 1])
-    sns.lineplot(data=pd.DataFrame({'log variational_posterior': losses_epoch[2]}), palette="tab10", linewidth=2.5, ax=ax[1, 0])
-    sns.lineplot(data=pd.DataFrame({'log likelihood': losses_epoch[3]}), palette="tab10", linewidth=2.5, ax=ax[1, 1])
-
-    plt.show()
+    make_plots(losses_epoch)
 
 
 if __name__ == '__main__':
