@@ -9,17 +9,19 @@ from torchvision import datasets, transforms
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 from typing import List, Tuple
 sns.set(style="whitegrid")
 
 
 @dataclass
 class Constant:
-    batch_size = 100
-    test_batch_size = 10
+    batch_size = 500
+    test_batch_size = 20
     classes = 10
     train_epochs = 1
     samples = 2
+    number_networks = 5
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -38,7 +40,7 @@ class Gaussian:
     This is used for the variational posterior distributions.
     """
 
-    def __init__(self, mu, rho):
+    def __init__(self, mu, rho) -> None:
         """
         Initialize a Gaussian distribution with the given parameters.
 
@@ -215,13 +217,16 @@ def train(net, optimizer, train_loader):
     net.train()
 
     for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
+        # Zero the gradient buffers
         net.zero_grad()
         values = net.sample_elbo(data, target, len(train_loader))
 
         for i, value in enumerate(values):
             losses[i].append(value.item())
 
+        # Calculate the gradients, but doesn't update
         values[0].backward()
+        # Does the update
         optimizer.step()
 
     return losses
@@ -233,7 +238,6 @@ def load_data() -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoade
 
     :return: A tuple where the first item is the training set, and the second is the test set.
     """
-
     train_loader = torch.utils.data.DataLoader(datasets.MNIST('./mnist', train=True, download=True,
                                                               transform=transforms.ToTensor()),
                                                batch_size=Constant.batch_size, shuffle=True)
@@ -260,14 +264,8 @@ def make_plots(losses: List[List[float]]) -> None:
     plt.show()
 
 
-def training_procedure() -> None:
+def training_procedure(net: BayesianNetwork, train_loader: torch.utils.data.DataLoader) -> BayesianNetwork:
     """Run the training procedure epochs number of times."""
-    # Load data
-    train_loader, test_loader = load_data()
-
-    # Set up a bayesian neural network
-    net = BayesianNetwork().to(Constant.device)
-
     # Set up optimizer
     optimizer = optim.Adam(net.parameters())
 
@@ -283,9 +281,59 @@ def training_procedure() -> None:
     # Make plot of the different components of the elbo
     make_plots(losses_epoch)
 
+    return net
+
+
+def test_ensemble(net: BayesianNetwork, test_loader: torch.utils.data.DataLoader) -> None:
+    """Run test set on networks with different weights, and a ensemble of them."""
+    correct = 0
+    test_size = len(test_loader.dataset)
+    corrects = np.zeros(Constant.number_networks + 1, dtype=int)
+
+    with torch.no_grad():
+        for data, target in tqdm(test_loader):
+
+            # A tensor where the first dimension is the predictions of the different networks
+            # Second dimension is the the different samples in the batch
+            # Third dimension is the probabilities for the different classes predicted
+            outputs = torch.zeros(Constant.number_networks + 1, Constant.test_batch_size, Constant.classes)
+
+            # Sample Constant.test_samples number of weight configurations, which means that we get
+            # Constant.test_samples number of networks
+            for i in range(Constant.number_networks):
+                outputs[i] = net.forward(data, sample=True)
+
+            # Last network which uses the mean of the distributions as weights
+            outputs[Constant.number_networks] = net.forward(data, sample=False)
+
+            # Finds which class has the highest probability for each network
+            preds = outputs.max(2, keepdim=True)[1]
+
+            # Find the mean prediction of all the networks
+            output = outputs.mean(0)
+
+            # Finds which class has the highest probability based on the average of all the networks
+            pred = output.max(1, keepdim=True)[1]
+
+            # Finds out number of correct predictions
+            corrects += preds.eq(target.view_as(pred)).sum(dim=1).squeeze().cpu().numpy()
+            correct += pred.eq(target.view_as(pred)).sum().item()
+
+    for index, num in enumerate(corrects):
+        if index < Constant.number_networks:
+            print(f"Network {index}'s accuracy: {num/test_size}")
+        else:
+            print(f"Network using the mean weight's accuracy: {num/test_size}")
+    print(f'Ensemble Accuracy: {correct/test_size}')
+
 
 def main() -> None:
-    training_procedure()
+    # Load data
+    train_loader, test_loader = load_data()
+
+    net = BayesianNetwork().to(Constant.device)
+    net = training_procedure(net, train_loader)
+    test_ensemble(net, test_loader)
 
 
 if __name__ == '__main__':
