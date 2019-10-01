@@ -11,22 +11,26 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 from typing import List, Tuple
+from torchvision.utils import make_grid
+import torch.nn as nn
 sns.set(style="whitegrid")
 
 
 @dataclass
 class Constant:
-    batch_size = 500
-    test_batch_size = 20
-    classes = 10
-    train_epochs = 1
-    samples = 2
-    number_networks = 5
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    """Class for non distribution related constants."""
+    batch_size: int = 200
+    test_batch_size: int = 20
+    classes: int = 10
+    train_epochs: int = 1
+    samples: int = 1
+    num_networks: int = 5
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @dataclass
 class DistConstant:
+    """Class for all initialization constants for different distributions"""
     init_mu = (-0.2, 0.2)
     init_rho = (-5, -4)
     mixture_scale = 0.5
@@ -56,17 +60,17 @@ class Gaussian:
         """Property for the mu variable."""
         return self._mu
 
-    def _sigma(self):
+    def __sigma(self):
         """A matrix of the same size as rho."""
         return torch.log1p(torch.exp(self._rho))
 
-    def _epsilon(self):
+    def __epsilon(self):
         """Epsilon is point-wise multiplied with sigma, therefore it must be of the same size as sigma."""
         return self._normal.sample(self._rho.size()).to(Constant.device)
 
     def sample(self):
         """Sampling weights."""
-        return self._mu + self._sigma() * self._epsilon()
+        return self._mu + self.__sigma() * self.__epsilon()
 
     def log_prob(self, input_):
         """
@@ -78,8 +82,8 @@ class Gaussian:
         two_pi = torch.empty(self._rho.size()).fill_(2 * math.pi).to(Constant.device)
 
         p1 = torch.log(torch.sqrt(two_pi))
-        p2 = torch.log(self._sigma())
-        p3 = ((input_ - self._mu) ** 2) / ((2 * self._sigma()) ** 2)
+        p2 = torch.log(self.__sigma())
+        p3 = ((input_ - self._mu) ** 2) / ((2 * self.__sigma()) ** 2)
 
         return (-p1 - p2 - p3).sum()
 
@@ -110,6 +114,68 @@ class ScaleMixtureGaussian:
         prob2 = torch.exp(self._normal2.log_prob(input_))
 
         return (torch.log(self._pi * prob1 + (1 - self._pi) * prob2)).sum()
+
+
+class BayesianConvolution(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+        super().__init__()
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+
+        # Weight parameters
+        self._initialize_weight()
+
+        # Bias parameters
+        self._initialize_bias()
+
+        # Prior distributions
+        self.weight_prior = ScaleMixtureGaussian(DistConstant.mixture_scale, DistConstant.sigma1, DistConstant.sigma2)
+        self.bias_prior = ScaleMixtureGaussian(DistConstant.mixture_scale, DistConstant.sigma1, DistConstant.sigma2)
+        self.log_prior, self.log_variational_posterior = 0, 0
+
+    def _initialize_weight(self):
+        # mu
+        weight_mu = torch.empty((self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)).uniform_(
+                DistConstant.init_mu[0],
+                DistConstant.init_mu[1])
+        self.weight_mu = torch.nn.Parameter(weight_mu)
+
+        # rho
+        weight_rho = torch.empty((self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)).uniform_(
+                DistConstant.init_rho[0],
+                DistConstant.init_rho[1])
+        self.weight_rho = torch.nn.Parameter(weight_rho)
+        # Initialize the weights to gaussian variational posteriors
+        self.weight = Gaussian(self.weight_mu, self.weight_rho)
+
+    def _initialize_bias(self):
+        # mu
+        bias_mu = torch.empty(self.out_channels).uniform_(DistConstant.init_mu[0], DistConstant.init_mu[1])
+        self.bias_mu = torch.nn.Parameter(bias_mu)
+        # rho
+        bias_rho = torch.empty(self.out_channels).uniform_(DistConstant.init_rho[0], DistConstant.init_rho[1])
+        self.bias_rho = torch.nn.Parameter(bias_rho)
+        # Initialize the biases to gaussian variational posteriors
+        self.bias = Gaussian(self.bias_mu, self.bias_rho)
+
+    def forward(self, input_, sample=False, calculate_log_prob=False):
+        if self.training or sample:
+            weight = self.weight.sample()
+            bias = self.bias.sample()
+        else:
+            weight = self.weight.mu()
+            bias = self.bias.mu()
+
+        if self.training or calculate_log_prob:
+            self.log_prior = self.weight_prior.log_prob(weight) + self.bias_prior.log_prob(bias)
+            self.log_variational_posterior = self.weight.log_prob(weight) + self.bias.log_prob(bias)
+        else:
+            self.log_prior, self.log_variational_posterior = 0, 0
+        return F.conv2d(input_.to(Constant.device), weight, bias, self.stride, self.padding)
 
 
 class BayesianLinear(torch.nn.Module):
@@ -165,25 +231,41 @@ class BayesianLinear(torch.nn.Module):
 class BayesianNetwork(torch.nn.Module):
     def __init__(self):
         super(BayesianNetwork, self).__init__()
-        self.l1 = BayesianLinear(28 * 28, 400)
-        self.l2 = BayesianLinear(400, 400)
-        self.l3 = BayesianLinear(400, 10)
+        self.conv1 = BayesianConvolution(1, 6, 5)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = BayesianConvolution(6, 16, 5)
+        self.fc1 = BayesianLinear(16 * 4 * 4, 400)
+        self.fc2 = BayesianLinear(400, 400)
+        self.f3 = BayesianLinear(400, 10)
 
     def forward(self, _input, sample=False):
         """Propagate the input through the network."""
-        _input = _input.view(-1, 28 * 28)
-        _input = F.relu(self.l1(_input, sample))
-        _input = F.relu(self.l2(_input, sample))
-        _input = F.log_softmax(self.l3(_input, sample), dim=1)
+        _input = self.pool(F.relu(self.conv1(_input)))
+        _input = self.pool(F.relu(self.conv2(_input)))
+        _input = _input.view(-1, BayesianNetwork.num_flat_features(_input))
+        _input = F.relu(self.fc1(_input, sample))
+        _input = F.relu(self.fc2(_input, sample))
+        _input = F.log_softmax(self.f3(_input, sample), dim=1)
         return _input
+
+    @staticmethod
+    def num_flat_features(input_):
+        size = input_.size()[1:]  # all dimensions except the batch dimension
+        num_features = 1
+        for s in size:
+            num_features *= s
+        return num_features
 
     def log_prior(self):
         """Return the summed log prior probabilities from all layers."""
-        return self.l1.log_prior + self.l2.log_prior + self.l3.log_prior
+        return self.conv1.log_prior + self.conv2.log_prior + \
+               self.fc1.log_prior + self.fc2.log_prior + self.f3.log_prior
 
     def log_variational_posterior(self):
         """Return the summed log variational posterior probabilities from all layers."""
-        return self.l1.log_variational_posterior + self.l2.log_variational_posterior + self.l3.log_variational_posterior
+        return self.conv1.log_variational_posterior + self.conv2.log_variational_posterior + \
+               self.fc1.log_variational_posterior + self.fc2.log_variational_posterior + \
+               self.f3.log_variational_posterior
 
     def sample_elbo(self, input_, target, num_batches, samples=Constant.samples):
         """Sample the elbo, implementing the minibatch version presented in section 3.4 in BBB paper."""
@@ -288,7 +370,7 @@ def test_ensemble(net: BayesianNetwork, test_loader: torch.utils.data.DataLoader
     """Run test set on networks with different weights, and a ensemble of them."""
     correct = 0
     test_size = len(test_loader.dataset)
-    corrects = np.zeros(Constant.number_networks + 1, dtype=int)
+    corrects = np.zeros(Constant.num_networks + 1, dtype=int)
 
     with torch.no_grad():
         for data, target in tqdm(test_loader):
@@ -296,15 +378,15 @@ def test_ensemble(net: BayesianNetwork, test_loader: torch.utils.data.DataLoader
             # A tensor where the first dimension is the predictions of the different networks
             # Second dimension is the the different samples in the batch
             # Third dimension is the probabilities for the different classes predicted
-            outputs = torch.zeros(Constant.number_networks + 1, Constant.test_batch_size, Constant.classes)
+            outputs = torch.zeros(Constant.num_networks + 1, Constant.test_batch_size, Constant.classes)
 
             # Sample Constant.test_samples number of weight configurations, which means that we get
             # Constant.test_samples number of networks
-            for i in range(Constant.number_networks):
+            for i in range(Constant.num_networks):
                 outputs[i] = net.forward(data, sample=True)
 
             # Last network which uses the mean of the distributions as weights
-            outputs[Constant.number_networks] = net.forward(data, sample=False)
+            outputs[Constant.num_networks] = net.forward(data, sample=False)
 
             # Finds which class has the highest probability for each network
             preds = outputs.max(2, keepdim=True)[1]
@@ -320,19 +402,37 @@ def test_ensemble(net: BayesianNetwork, test_loader: torch.utils.data.DataLoader
             correct += pred.eq(target.view_as(pred)).sum().item()
 
     for index, num in enumerate(corrects):
-        if index < Constant.number_networks:
+        if index < Constant.num_networks:
             print(f"Network {index}'s accuracy: {num/test_size}")
         else:
             print(f"Network using the mean weight's accuracy: {num/test_size}")
     print(f'Ensemble Accuracy: {correct/test_size}')
 
 
+def show(img) -> None:
+    """Given a image, display it."""
+    plt.imshow(np.transpose(img.numpy(), (1, 2, 0)), interpolation='nearest')
+    plt.show()
+
+
+def test_sample(test_loader: torch.utils.data.DataLoader):
+    mnist_sample = iter(test_loader).next()
+    mnist_sample[0] = mnist_sample[0].to(Constant.device)
+    sns.set_style("dark")
+    show(make_grid(mnist_sample[0].cpu()))
+
+
 def main() -> None:
     # Load data
     train_loader, test_loader = load_data()
 
+    # Initialize a network
     net = BayesianNetwork().to(Constant.device)
+
+    # Train the network on the training set
     net = training_procedure(net, train_loader)
+
+    # Test the network on the test set
     test_ensemble(net, test_loader)
 
 
