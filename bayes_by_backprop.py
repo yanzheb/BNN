@@ -290,6 +290,10 @@ class BayesianNetwork(torch.nn.Module):
 
 
 class GuidedBackpropRelu(Function):
+    def __init__(self):
+        super.__init__()
+        self.saliency = False
+
     def forward(self, input_):
         """Do normal relu operation to the input, but in addition save the input and output of the operation"""
         positive_mask = (input_ > 0).type_as(input_)  # Zero out negative values
@@ -300,6 +304,8 @@ class GuidedBackpropRelu(Function):
         return output
 
     def backward(self, grad_output):
+        if not self.saliency:
+            return grad_output
         input_, output = self.saved_tensors
 
         positive_mask_1 = (input_ > 0).type_as(grad_output)
@@ -490,9 +496,9 @@ def main() -> None:
     # Saliency
     sample = next(iter(test_loader))
     sal = saliency(sample[0], sample[1], net)
-    image = sample[0][3]
+    image = sample[0][2]
     show(make_grid(image))
-    show(make_grid(sal[3].cpu().detach()))
+    show(make_grid(sal[2].cpu().detach()))
 
 
 if __name__ == '__main__':
