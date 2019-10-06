@@ -1,8 +1,9 @@
 from torch.distributions.normal import Normal
 import torch
-from dataclasses import dataclass
+from constants import Constant, DistConstant
 import math
 import torch.nn.functional as F
+from torch.autograd import Function
 from tqdm import tqdm
 import torch.optim as optim
 from torchvision import datasets, transforms
@@ -13,29 +14,8 @@ import numpy as np
 from typing import List, Tuple
 from torchvision.utils import make_grid
 import torch.nn as nn
-sns.set(style="whitegrid")
-
-
-@dataclass
-class Constant:
-    """Class for non distribution related constants."""
-    batch_size: int = 200
-    test_batch_size: int = 20
-    classes: int = 10
-    train_epochs: int = 1
-    samples: int = 1
-    num_networks: int = 5
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-@dataclass
-class DistConstant:
-    """Class for all initialization constants for different distributions"""
-    init_mu = (-0.2, 0.2)
-    init_rho = (-5, -4)
-    mixture_scale = 0.5
-    sigma1 = torch.tensor([math.exp(-0)]).to(Constant.device)
-    sigma2 = torch.tensor([math.exp(-6)]).to(Constant.device)
+import matplotlib.pyplot as plt
+# sns.set(style="whitegrid")
 
 
 class Gaussian:
@@ -139,16 +119,15 @@ class BayesianConvolution(torch.nn.Module):
 
     def _initialize_weight(self):
         # mu
-        weight_mu = torch.empty((self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)).uniform_(
-                DistConstant.init_mu[0],
-                DistConstant.init_mu[1])
+        weight_mu = torch.empty((self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)
+                                ).uniform_(DistConstant.init_mu[0], DistConstant.init_mu[1])
         self.weight_mu = torch.nn.Parameter(weight_mu)
 
         # rho
-        weight_rho = torch.empty((self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)).uniform_(
-                DistConstant.init_rho[0],
-                DistConstant.init_rho[1])
+        weight_rho = torch.empty((self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)
+                                 ).uniform_(DistConstant.init_rho[0], DistConstant.init_rho[1])
         self.weight_rho = torch.nn.Parameter(weight_rho)
+
         # Initialize the weights to gaussian variational posteriors
         self.weight = Gaussian(self.weight_mu, self.weight_rho)
 
@@ -156,9 +135,11 @@ class BayesianConvolution(torch.nn.Module):
         # mu
         bias_mu = torch.empty(self.out_channels).uniform_(DistConstant.init_mu[0], DistConstant.init_mu[1])
         self.bias_mu = torch.nn.Parameter(bias_mu)
+
         # rho
         bias_rho = torch.empty(self.out_channels).uniform_(DistConstant.init_rho[0], DistConstant.init_rho[1])
         self.bias_rho = torch.nn.Parameter(bias_rho)
+
         # Initialize the biases to gaussian variational posteriors
         self.bias = Gaussian(self.bias_mu, self.bias_rho)
 
@@ -175,6 +156,7 @@ class BayesianConvolution(torch.nn.Module):
             self.log_variational_posterior = self.weight.log_prob(weight) + self.bias.log_prob(bias)
         else:
             self.log_prior, self.log_variational_posterior = 0, 0
+
         return F.conv2d(input_.to(Constant.device), weight, bias, self.stride, self.padding)
 
 
@@ -231,6 +213,8 @@ class BayesianLinear(torch.nn.Module):
 class BayesianNetwork(torch.nn.Module):
     def __init__(self):
         super(BayesianNetwork, self).__init__()
+        self.relu = GuidedBackpropRelu()
+
         self.conv1 = BayesianConvolution(1, 6, 5)
         self.pool = nn.MaxPool2d(2, 2)
         self.conv2 = BayesianConvolution(6, 16, 5)
@@ -238,15 +222,31 @@ class BayesianNetwork(torch.nn.Module):
         self.fc2 = BayesianLinear(400, 400)
         self.f3 = BayesianLinear(400, 10)
 
-    def forward(self, _input, sample=False):
+        self.backwards = []
+        self.forwards = []
+
+    def forward(self, _input, sample=False, saliency=False):
         """Propagate the input through the network."""
+
+        # Conv layers
         _input = self.pool(F.relu(self.conv1(_input)))
-        _input = self.pool(F.relu(self.conv2(_input)))
+
+        _input = F.relu(self.conv2(_input))
+        _input.register_hook(self.save_backward)
+        if saliency:
+            self.forwards.append(_input)
+
+        _input = self.pool(_input)
+
+        # Feed forward layers
         _input = _input.view(-1, BayesianNetwork.num_flat_features(_input))
         _input = F.relu(self.fc1(_input, sample))
         _input = F.relu(self.fc2(_input, sample))
         _input = F.log_softmax(self.f3(_input, sample), dim=1)
         return _input
+
+    def save_backward(self, grad):
+        self.backwards.append(grad)
 
     @staticmethod
     def num_flat_features(input_):
@@ -267,14 +267,17 @@ class BayesianNetwork(torch.nn.Module):
                self.fc1.log_variational_posterior + self.fc2.log_variational_posterior + \
                self.f3.log_variational_posterior
 
-    def sample_elbo(self, input_, target, num_batches, samples=Constant.samples):
+    def sample_elbo(self, input_, target, num_batches, batch_size, samples=Constant.samples, saliency=False):
         """Sample the elbo, implementing the minibatch version presented in section 3.4 in BBB paper."""
-        outputs = torch.zeros(samples, Constant.batch_size, Constant.classes).to(Constant.device)
+        outputs = torch.zeros(samples, batch_size, Constant.classes).to(Constant.device)
         log_priors = torch.zeros(samples).to(Constant.device)
         log_variational_posteriors = torch.zeros(samples).to(Constant.device)
 
         for i in range(samples):
-            outputs[i] = self(input_, sample=True)
+            if saliency:
+                outputs[i] = self(input_, sample=True, saliency=saliency)
+            else:
+                outputs[i] = self(input_, sample=True)
             log_priors[i] = self.log_prior()
             log_variational_posteriors[i] = self.log_variational_posterior()
 
@@ -284,6 +287,28 @@ class BayesianNetwork(torch.nn.Module):
 
         loss = (log_variational_posterior - log_prior) / num_batches + negative_log_likelihood
         return loss, log_prior, log_variational_posterior, negative_log_likelihood
+
+
+class GuidedBackpropRelu(Function):
+    def forward(self, input_):
+        """Do normal relu operation to the input, but in addition save the input and output of the operation"""
+        positive_mask = (input_ > 0).type_as(input_)  # Zero out negative values
+
+        # Do the relu operation
+        output = torch.addcmul(torch.zeros(input_.size()).type_as(input_), input_, positive_mask)
+        self.save_for_backward(input_, output)
+        return output
+
+    def backward(self, grad_output):
+        input_, output = self.saved_tensors
+
+        positive_mask_1 = (input_ > 0).type_as(grad_output)
+        positive_mask_2 = (grad_output > 0).type_as(grad_output)
+        grad_input = torch.addcmul(torch.zeros(input_.size()).type_as(input_),
+                                   torch.addcmul(torch.zeros(input_.size()).type_as(input_),
+                                                 grad_output, positive_mask_1), positive_mask_2)
+
+        return grad_input
 
 
 def train(net, optimizer, train_loader):
@@ -301,7 +326,7 @@ def train(net, optimizer, train_loader):
     for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
         # Zero the gradient buffers
         net.zero_grad()
-        values = net.sample_elbo(data, target, len(train_loader))
+        values = net.sample_elbo(data, target, len(train_loader), Constant.batch_size)
 
         for i, value in enumerate(values):
             losses[i].append(value.item())
@@ -386,7 +411,7 @@ def test_ensemble(net: BayesianNetwork, test_loader: torch.utils.data.DataLoader
                 outputs[i] = net.forward(data, sample=True)
 
             # Last network which uses the mean of the distributions as weights
-            outputs[Constant.num_networks] = net.forward(data, sample=False)
+            outputs[Constant.num_networks] = net.forward(data)
 
             # Finds which class has the highest probability for each network
             preds = outputs.max(2, keepdim=True)[1]
@@ -418,8 +443,35 @@ def show(img) -> None:
 def test_sample(test_loader: torch.utils.data.DataLoader):
     mnist_sample = iter(test_loader).next()
     mnist_sample[0] = mnist_sample[0].to(Constant.device)
-    sns.set_style("dark")
+    # sns.set_style("dark")
     show(make_grid(mnist_sample[0].cpu()))
+
+
+def saliency(data, target, net):
+    # Empty gradient, and all saved values
+    net.zero_grad()
+    net.backwards = []
+    net.forwards = []
+
+    # Make a forward and backward pass
+    values = net.sample_elbo(data, target, 1, data.shape[0], saliency=True)
+
+    # Calculate the gradients, but doesn't update
+    values[0].backward()
+
+    back = net.backwards[0]
+    forward = net.forwards[0]
+
+    weight_importance = (torch.sum(torch.sum(net.backwards[0], dim=2), dim=2)) / (back.shape[2] + back.shape[3])
+    grad_cam = torch.zeros((forward.shape[0], forward.shape[2], forward.shape[3])).to(Constant.device)
+
+    for sample_i in range(weight_importance.shape[0]):
+        for filter_i in range(weight_importance.shape[1]):
+            grad_cam[sample_i] += weight_importance[sample_i, filter_i] * forward[sample_i, filter_i]
+        grad_cam[sample_i] = F.relu(grad_cam[sample_i])
+        grad_cam[sample_i] = grad_cam[sample_i] / torch.max(grad_cam[sample_i]).item()
+
+    return grad_cam
 
 
 def main() -> None:
@@ -433,7 +485,14 @@ def main() -> None:
     net = training_procedure(net, train_loader)
 
     # Test the network on the test set
-    test_ensemble(net, test_loader)
+    # test_ensemble(net, test_loader)
+
+    # Saliency
+    sample = next(iter(test_loader))
+    sal = saliency(sample[0], sample[1], net)
+    image = sample[0][3]
+    show(make_grid(image))
+    show(make_grid(sal[3].cpu().detach()))
 
 
 if __name__ == '__main__':
