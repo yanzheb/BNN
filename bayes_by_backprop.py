@@ -217,17 +217,19 @@ class BayesianNetwork(torch.nn.Module):
         super(BayesianNetwork, self).__init__()
         # Conv layer 1
         self.conv1 = BayesianConvolution(1, 6, 5)
-        self.relu1 = F.relu
+        self.relu1 = nn.ReLU()
         self.pool1 = nn.MaxPool2d(2, 2)
 
         # Conv layer 2
         self.conv2 = BayesianConvolution(6, 16, 5)
-        self.relu2 = F.relu
+        self.relu2 = nn.ReLU()
         self.pool2 = nn.MaxPool2d(2, 2)
 
         # FF network
         self.fc1 = BayesianLinear(16 * 4 * 4, 400)
+        self.relu3 = nn.ReLU()
         self.fc2 = BayesianLinear(400, 400)
+        self.relu4 = nn.ReLU()
         self.f3 = BayesianLinear(400, 10)
 
         self.backwards = []
@@ -240,16 +242,16 @@ class BayesianNetwork(torch.nn.Module):
         _input = self.pool1(self.relu1(self.conv1(_input)))
 
         _input = self.relu2(self.conv2(_input))
-        _input.register_hook(self.save_backward)
         if saliency:
+            _input.register_hook(self.save_backward)
             self.forwards.append(_input)
 
         _input = self.pool2(_input)
 
         # Feed forward layers
         _input = _input.view(-1, BayesianNetwork.num_flat_features(_input))
-        _input = F.relu(self.fc1(_input, sample))
-        _input = F.relu(self.fc2(_input, sample))
+        _input = self.relu3(self.fc1(_input, sample))
+        _input = self.relu4(self.fc2(_input, sample))
         _input = F.log_softmax(self.f3(_input, sample), dim=1)
         return _input
 
@@ -295,35 +297,6 @@ class BayesianNetwork(torch.nn.Module):
 
         loss = (log_variational_posterior - log_prior) / num_batches + negative_log_likelihood
         return loss, log_prior, log_variational_posterior, negative_log_likelihood
-
-
-class GuidedBackpropRelu(Function):
-    def __init__(self):
-        super().__init__()
-        self.saliency = False
-
-    @staticmethod
-    def forward(self, ctx, input_):
-        """Do normal relu operation to the input, but in addition save the input and output of the operation"""
-        positive_mask = (input_ > 0).type_as(input_)  # Zero out negative values
-
-        # Do the relu operation
-        output = torch.addcmul(torch.zeros(input_.size()).type_as(input_), input_, positive_mask)
-        return output
-
-    def backward(self, ctx, grad_output):
-        print("LOL")
-        if not self.saliency:
-            return grad_output
-        input_, output = self.saved_tensors
-
-        positive_mask_1 = (input_ > 0).type_as(grad_output)
-        positive_mask_2 = (grad_output > 0).type_as(grad_output)
-        grad_input = torch.addcmul(torch.zeros(input_.size()).type_as(input_),
-                                   torch.addcmul(torch.zeros(input_.size()).type_as(input_),
-                                                 grad_output, positive_mask_1), positive_mask_2)
-
-        return grad_input
 
 
 def train(net, optimizer, train_loader):
@@ -478,10 +451,12 @@ def saliency(data, target, net):
     back = net.backwards[0]
     forward = net.forwards[0]
 
+    # Calculate importance of filters
     weight_importance = (torch.sum(torch.sum(net.backwards[0], dim=2), dim=2)) / (back.shape[2] + back.shape[3])
     grad_cam = torch.zeros((forward.shape[0], forward.shape[2], forward.shape[3])).to(Constant.device)
     mask = np.zeros(data.shape)
 
+    # Calculate grad cam and interpolate the result to original image size
     for sample_i in range(weight_importance.shape[0]):
         for filter_i in range(weight_importance.shape[1]):
             grad_cam[sample_i] += weight_importance[sample_i, filter_i] * forward[sample_i, filter_i]
@@ -494,8 +469,6 @@ def saliency(data, target, net):
     for sample_i in range(mask.shape[0]):
         for channel in range(mask.shape[1]):
             mask[sample_i, channel] = mask[sample_i, channel] * data.grad[sample_i, channel]
-            mask[sample_i, channel] = mask[sample_i, channel] - torch.min(mask[sample_i, channel]).item()
-            mask[sample_i, channel] = mask[sample_i, channel] / torch.max(mask[sample_i, channel]).item()
 
     return mask
 
@@ -514,11 +487,16 @@ def main() -> None:
     # test_ensemble(net, test_loader)
 
     # Saliency
+    index = 2
     sample = next(iter(test_loader))
-    sal = saliency(sample[0], sample[1], net)
-    image = sample[0][2]
-    show(make_grid(image.cpu().detach()))
-    show(make_grid(sal[2]))
+    mask = saliency(sample[0], sample[1], net)
+    for channel in range(mask.shape[1]):
+        mask[index, channel] = mask[index, channel] * sample[0][index, channel]
+        mask[index, channel] = mask[index, channel] - torch.min(mask[index, channel]).item()
+        mask[index, channel] = mask[index, channel] / torch.max(mask[index, channel]).item()
+
+    show(make_grid(sample[0][index].cpu().detach()))
+    show(make_grid(mask[index].detach()))
 
 
 if __name__ == '__main__':
