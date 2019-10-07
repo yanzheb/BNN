@@ -10,11 +10,13 @@ from torchvision import datasets, transforms
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import scipy
 import numpy as np
 from typing import List, Tuple
 from torchvision.utils import make_grid
 import torch.nn as nn
 import matplotlib.pyplot as plt
+import skimage
 # sns.set(style="whitegrid")
 
 
@@ -213,11 +215,17 @@ class BayesianLinear(torch.nn.Module):
 class BayesianNetwork(torch.nn.Module):
     def __init__(self):
         super(BayesianNetwork, self).__init__()
-        self.relu = GuidedBackpropRelu()
-
+        # Conv layer 1
         self.conv1 = BayesianConvolution(1, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
+        self.relu1 = F.relu
+        self.pool1 = nn.MaxPool2d(2, 2)
+
+        # Conv layer 2
         self.conv2 = BayesianConvolution(6, 16, 5)
+        self.relu2 = F.relu
+        self.pool2 = nn.MaxPool2d(2, 2)
+
+        # FF network
         self.fc1 = BayesianLinear(16 * 4 * 4, 400)
         self.fc2 = BayesianLinear(400, 400)
         self.f3 = BayesianLinear(400, 10)
@@ -229,14 +237,14 @@ class BayesianNetwork(torch.nn.Module):
         """Propagate the input through the network."""
 
         # Conv layers
-        _input = self.pool(F.relu(self.conv1(_input)))
+        _input = self.pool1(self.relu1(self.conv1(_input)))
 
-        _input = F.relu(self.conv2(_input))
+        _input = self.relu2(self.conv2(_input))
         _input.register_hook(self.save_backward)
         if saliency:
             self.forwards.append(_input)
 
-        _input = self.pool(_input)
+        _input = self.pool2(_input)
 
         # Feed forward layers
         _input = _input.view(-1, BayesianNetwork.num_flat_features(_input))
@@ -291,19 +299,20 @@ class BayesianNetwork(torch.nn.Module):
 
 class GuidedBackpropRelu(Function):
     def __init__(self):
-        super.__init__()
+        super().__init__()
         self.saliency = False
 
-    def forward(self, input_):
+    @staticmethod
+    def forward(self, ctx, input_):
         """Do normal relu operation to the input, but in addition save the input and output of the operation"""
         positive_mask = (input_ > 0).type_as(input_)  # Zero out negative values
 
         # Do the relu operation
         output = torch.addcmul(torch.zeros(input_.size()).type_as(input_), input_, positive_mask)
-        self.save_for_backward(input_, output)
         return output
 
-    def backward(self, grad_output):
+    def backward(self, ctx, grad_output):
+        print("LOL")
         if not self.saliency:
             return grad_output
         input_, output = self.saved_tensors
@@ -458,6 +467,7 @@ def saliency(data, target, net):
     net.zero_grad()
     net.backwards = []
     net.forwards = []
+    data.requires_grad = True
 
     # Make a forward and backward pass
     values = net.sample_elbo(data, target, 1, data.shape[0], saliency=True)
@@ -470,14 +480,24 @@ def saliency(data, target, net):
 
     weight_importance = (torch.sum(torch.sum(net.backwards[0], dim=2), dim=2)) / (back.shape[2] + back.shape[3])
     grad_cam = torch.zeros((forward.shape[0], forward.shape[2], forward.shape[3])).to(Constant.device)
+    mask = np.zeros(data.shape)
 
     for sample_i in range(weight_importance.shape[0]):
         for filter_i in range(weight_importance.shape[1]):
             grad_cam[sample_i] += weight_importance[sample_i, filter_i] * forward[sample_i, filter_i]
         grad_cam[sample_i] = F.relu(grad_cam[sample_i])
-        grad_cam[sample_i] = grad_cam[sample_i] / torch.max(grad_cam[sample_i]).item()
+        mask[sample_i] = skimage.transform.resize(grad_cam[sample_i].cpu().detach().numpy(), data.shape[2:])
 
-    return grad_cam
+    mask = torch.from_numpy(mask).float()
+
+    # Point wise multiplication between gradient of input and grad cam
+    for sample_i in range(mask.shape[0]):
+        for channel in range(mask.shape[1]):
+            mask[sample_i, channel] = mask[sample_i, channel] * data.grad[sample_i, channel]
+            mask[sample_i, channel] = mask[sample_i, channel] - torch.min(mask[sample_i, channel]).item()
+            mask[sample_i, channel] = mask[sample_i, channel] / torch.max(mask[sample_i, channel]).item()
+
+    return mask
 
 
 def main() -> None:
@@ -497,8 +517,8 @@ def main() -> None:
     sample = next(iter(test_loader))
     sal = saliency(sample[0], sample[1], net)
     image = sample[0][2]
-    show(make_grid(image))
-    show(make_grid(sal[2].cpu().detach()))
+    show(make_grid(image.cpu().detach()))
+    show(make_grid(sal[2]))
 
 
 if __name__ == '__main__':
