@@ -2,13 +2,14 @@ from dataclasses import dataclass
 import torch
 import math
 
+
 @dataclass
 class Constant:
     """Class for non distribution related constants."""
     batch_size: int = 200
     test_batch_size: int = 20
     classes: int = 10
-    train_epochs: int = 1
+    train_epochs: int = 70
     samples: int = 1
     num_networks: int = 5
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

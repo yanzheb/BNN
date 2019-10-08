@@ -14,29 +14,8 @@ from typing import List, Tuple
 from torchvision.utils import make_grid
 import torch.nn as nn
 from grad_cam import GradCam, GuidedBackpropReLUModel
+from constants import Constant, DistConstant
 import joblib
-
-
-@dataclass
-class Constant:
-    """Class for non distribution related constants."""
-    batch_size: int = 200
-    test_batch_size: int = 20
-    classes: int = 10
-    train_epochs: int = 1
-    samples: int = 1
-    num_networks: int = 5
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-@dataclass
-class DistConstant:
-    """Class for all initialization constants for different distributions"""
-    init_mu = (-0.2, 0.2)
-    init_rho = (-5, -4)
-    mixture_scale = 0.5
-    sigma1 = torch.tensor([math.exp(-0)]).to(Constant.device)
-    sigma2 = torch.tensor([math.exp(-6)]).to(Constant.device)
 
 
 class Gaussian:
@@ -225,38 +204,46 @@ class BayesianLinear(torch.nn.Module):
             self.log_variational_posterior = self.weight.log_prob(weight) + self.bias.log_prob(bias)
         else:
             self.log_prior, self.log_variational_posterior = 0, 0
-
         return F.linear(input_.to(Constant.device), weight, bias)
 
 
 class BayesianNetwork(torch.nn.Module):
     def __init__(self):
         super(BayesianNetwork, self).__init__()
-        self.conv1 = BayesianConvolution(1, 6, 5)
+        self.conv1 = BayesianConvolution(3, 64, 3)
         self.relu1 = nn.ReLU()
         self.pool1 = nn.MaxPool2d(2, 2)
 
-        self.conv2 = BayesianConvolution(6, 16, 5)
+        self.conv2 = BayesianConvolution(64, 128, 3)
         self.pool2 = nn.MaxPool2d(2, 2)
         self.relu2 = nn.ReLU()
 
-        self.fc1 = BayesianLinear(16 * 4 * 4, 400)
+        self.conv3 = BayesianConvolution(128, 256, 3)
+        self.pool3 = nn.MaxPool2d(2, 2)
         self.relu3 = nn.ReLU()
 
-        self.fc2 = BayesianLinear(400, 400)
+        self.fc1 = BayesianLinear(1024, 128)
         self.relu4 = nn.ReLU()
 
-        self.fc3 = BayesianLinear(400, 10)
+        self.fc2 = BayesianLinear(128, 256)
+        self.relu5 = nn.ReLU()
+
+        self.fc3 = BayesianLinear(256, 512)
+        self.relu6 = nn.ReLU()
+
+        self.fc4 = BayesianLinear(512, 10)
 
     def forward(self, _input, sample=False):
         """Propagate the input through the network."""
         _input = self.pool1(self.relu1(self.conv1(_input, sample)))
         _input = self.pool2(self.relu2(self.conv2(_input, sample)))
+        _input = self.pool3(self.relu3(self.conv3(_input, sample)))
 
         _input = _input.view(_input.shape[0], -1)
-        _input = self.relu1(self.fc1(_input, sample))
-        _input = self.relu1(self.fc2(_input, sample))
-        _input = F.log_softmax(self.fc3(_input, sample), dim=1)
+        _input = self.relu4(self.fc1(_input, sample))
+        _input = self.relu5(self.fc2(_input, sample))
+        _input = self.relu6(self.fc3(_input, sample))
+        _input = F.log_softmax(self.fc4(_input, sample), dim=1)
         return _input
 
     def log_prior(self):
@@ -301,7 +288,7 @@ def train(net, optimizer, train_loader):
     losses = [[], [], [], []]
     net.train()
 
-    for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
+    for batch_idx, (data, target) in enumerate(train_loader):
         # Zero the gradient buffers
         net.zero_grad()
         values = net.sample_elbo(data, target, len(train_loader))
@@ -323,10 +310,10 @@ def load_data() -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoade
 
     :return: A tuple where the first item is the training set, and the second is the test set.
     """
-    train_loader = torch.utils.data.DataLoader(datasets.MNIST('./mnist', train=True, download=True,
+    train_loader = torch.utils.data.DataLoader(datasets.CIFAR10('./cifar10', train=True, download=True,
                                                               transform=transforms.ToTensor()),
                                                batch_size=Constant.batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(datasets.MNIST('./mnist', train=False, download=True,
+    test_loader = torch.utils.data.DataLoader(datasets.CIFAR10('./cifar10', train=False, download=True,
                                                              transform=transforms.ToTensor()),
                                               batch_size=Constant.test_batch_size, shuffle=False)
     return train_loader, test_loader
@@ -357,7 +344,7 @@ def training_procedure(net: BayesianNetwork, train_loader: torch.utils.data.Data
     losses_epoch = [[], [], [], []]
 
     # Run training session for Constant.train_epochs number of epochs
-    for _ in range(Constant.train_epochs):
+    for _ in tqdm(range(Constant.train_epochs)):
         losses = train(net, optimizer, train_loader)
 
         for i in range(len(losses_epoch)):
@@ -427,8 +414,7 @@ def test_sample(test_loader: torch.utils.data.DataLoader):
 def fuse_masks(grad_cam, guided_backprop):
     output = torch.empty(grad_cam.shape)
     for sample_i in range(grad_cam.shape[0]):
-        for channel in range(grad_cam.shape[1]):
-            output[sample_i, channel] = grad_cam[sample_i, channel] * guided_backprop[sample_i, channel]
+        output[sample_i] = grad_cam[sample_i] * guided_backprop[sample_i]
 
     return output
 
@@ -448,12 +434,10 @@ def ensemble_saliency(image, net, n_sample=5):
     total /= n_sample
 
     # Normalize
-    for sample in range(total.shape[0]):
-        for channel in range(total.shape[1]):
-            total[sample, channel] -= torch.min(total[sample, channel]).item()
-            total[sample, channel] /= (
-                        torch.max(total[sample, channel]).item() - torch.min(total[sample, channel]).item())
 
+    for sample in range(total.shape[0]):
+        total[sample] -= torch.min(total[sample]).item()
+        total[sample] /= (torch.max(total[sample]).item())
     return total
 
 
@@ -472,12 +456,15 @@ def main() -> None:
     # Test the network on the test set
     # test_ensemble(net, test_loader)
 
-    index = 1
+    index = 17
     sample = next(iter(test_loader))
-    explaination = ensemble_saliency(sample[0], net, 1)
+    explaination = ensemble_saliency(sample[0], net, 10)
+    pred = net.forward(sample[0])
 
     show(make_grid(sample[0].detach()[index]))
     show(make_grid(explaination.detach()[index]))
+    print(f"Predicted label {pred[index].max(0)[1]}")
+    print(f"True label {sample[1][index]}")
 
 
 if __name__ == '__main__':

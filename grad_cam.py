@@ -139,6 +139,6 @@ class GuidedBackpropReLUModel:
 
 		self.model.zero_grad()
 		one_hot.backward()
-		output = input_.grad.detach()
+		result = input_.grad.detach()
 
-		return output
+		return result
