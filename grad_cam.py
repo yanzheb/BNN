@@ -25,7 +25,11 @@ class FeatureExtractor:
 		for name, module in self.model._modules.items():
 			if name == "fc1":
 				input_ = input_.view(input_.shape[0], -1)
-			input_ = module(input_)
+			# Sample weights
+			if "conv" in name.lower() or "fc" in name.lower():
+				input_ = module(input_, sample=True)
+			else:
+				input_ = module(input_)
 
 			if name in self.target_layers:
 				input_.register_hook(self.save_gradient)
@@ -38,11 +42,7 @@ class FeatureExtractor:
 class GradCam:
 	def __init__(self, model, target_layers):
 		self.model = model
-
 		self.extractor = FeatureExtractor(model, target_layers)
-
-	def forward(self, input_):
-		return self.model(input_)
 
 	def __call__(self, input_):
 		input_size = input_.shape
@@ -123,7 +123,7 @@ class GuidedBackpropReLUModel:
 				setattr(model, name, GuidedBackpropReLU())
 
 	def forward(self, input_):
-		return self.model(input_)
+		return self.model(input_, sample=True)
 
 	def __call__(self, input_):
 		input_.requires_grad = True

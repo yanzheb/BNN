@@ -250,8 +250,8 @@ class BayesianNetwork(torch.nn.Module):
 
     def forward(self, _input, sample=False):
         """Propagate the input through the network."""
-        _input = self.pool1(self.relu1(self.conv1(_input)))
-        _input = self.pool2(self.relu2(self.conv2(_input)))
+        _input = self.pool1(self.relu1(self.conv1(_input, sample)))
+        _input = self.pool2(self.relu2(self.conv2(_input, sample)))
 
         _input = _input.view(_input.shape[0], -1)
         _input = self.relu1(self.fc1(_input, sample))
@@ -430,10 +430,31 @@ def fuse_masks(grad_cam, guided_backprop):
         for channel in range(grad_cam.shape[1]):
             output[sample_i, channel] = grad_cam[sample_i, channel] * guided_backprop[sample_i, channel]
 
-            output[sample_i, channel] -= torch.min(output[sample_i, channel]).item()
-            output[sample_i, channel] /= (torch.max(output[sample_i, channel]).item() - torch.min(output[sample_i, channel]).item())
-
     return output
+
+
+def ensemble_saliency(image, net, n_sample=5):
+    grad_cam = GradCam(net, ["relu2"])
+    grad_masks = [grad_cam(image) for _ in range(n_sample)]
+
+    guided_backprop = GuidedBackpropReLUModel(net)
+    guided_gradients = [guided_backprop(image) for _ in range(n_sample)]
+
+    total = torch.zeros(image.shape)
+
+    for i in tqdm(range(n_sample)):
+        total += fuse_masks(grad_masks[i], guided_gradients[i])
+
+    total /= n_sample
+
+    # Normalize
+    for sample in range(total.shape[0]):
+        for channel in range(total.shape[1]):
+            total[sample, channel] -= torch.min(total[sample, channel]).item()
+            total[sample, channel] /= (
+                        torch.max(total[sample, channel]).item() - torch.min(total[sample, channel]).item())
+
+    return total
 
 
 def main() -> None:
@@ -451,15 +472,9 @@ def main() -> None:
     # Test the network on the test set
     # test_ensemble(net, test_loader)
 
-    index = 4
-
+    index = 1
     sample = next(iter(test_loader))
-    grad_cam = GradCam(net, ["relu2"])
-    grad_cam_mask = grad_cam(sample[0])
-    guided_backprop = GuidedBackpropReLUModel(net)
-    guided_gradient = guided_backprop(sample[0])
-
-    explaination = fuse_masks(grad_cam_mask, guided_gradient)
+    explaination = ensemble_saliency(sample[0], net, 1)
 
     show(make_grid(sample[0].detach()[index]))
     show(make_grid(explaination.detach()[index]))
