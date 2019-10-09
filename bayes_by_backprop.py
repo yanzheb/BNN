@@ -120,14 +120,14 @@ class BayesianConvolution(torch.nn.Module):
     def _initialize_weight(self):
         # mu
         weight_mu = torch.empty((self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)).uniform_(
-                DistConstant.init_mu[0],
-                DistConstant.init_mu[1])
+            DistConstant.init_mu[0],
+            DistConstant.init_mu[1])
         self.weight_mu = torch.nn.Parameter(weight_mu)
 
         # rho
         weight_rho = torch.empty((self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)).uniform_(
-                DistConstant.init_rho[0],
-                DistConstant.init_rho[1])
+            DistConstant.init_rho[0],
+            DistConstant.init_rho[1])
         self.weight_rho = torch.nn.Parameter(weight_rho)
         # Initialize the weights to gaussian variational posteriors
         self.weight = Gaussian(self.weight_mu, self.weight_rho)
@@ -160,6 +160,7 @@ class BayesianConvolution(torch.nn.Module):
 
 class BayesianLinear(torch.nn.Module):
     """Single Bayesian Network layer."""
+
     def __init__(self, input_size, output_size):
         super().__init__()
 
@@ -215,20 +216,20 @@ class BayesianNetwork(torch.nn.Module):
         self.pool1 = nn.MaxPool2d(2, 2)
 
         self.conv2 = BayesianConvolution(64, 128, 3)
-        self.pool2 = nn.MaxPool2d(2, 2)
         self.relu2 = nn.ReLU()
+        self.pool2 = nn.MaxPool2d(2, 2)
 
         self.conv3 = BayesianConvolution(128, 256, 3)
-        self.pool3 = nn.MaxPool2d(2, 2)
         self.relu3 = nn.ReLU()
+        self.pool3 = nn.MaxPool2d(2, 2)
 
-        self.fc1 = BayesianLinear(1024, 128)
+        self.fc1 = BayesianLinear(25600, 1024)
         self.relu4 = nn.ReLU()
 
-        self.fc2 = BayesianLinear(128, 256)
+        self.fc2 = BayesianLinear(1024, 1024)
         self.relu5 = nn.ReLU()
 
-        self.fc3 = BayesianLinear(256, 512)
+        self.fc3 = BayesianLinear(1024, 512)
         self.relu6 = nn.ReLU()
 
         self.fc4 = BayesianLinear(512, 10)
@@ -310,11 +311,11 @@ def load_data() -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoade
 
     :return: A tuple where the first item is the training set, and the second is the test set.
     """
-    train_loader = torch.utils.data.DataLoader(datasets.CIFAR10('./cifar10', train=True, download=True,
-                                                              transform=transforms.ToTensor()),
+    train_loader = torch.utils.data.DataLoader(datasets.STL10('./stl10', split="train", download=True,
+                                                                 transform=transforms.ToTensor()),
                                                batch_size=Constant.batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(datasets.CIFAR10('./cifar10', train=False, download=True,
-                                                             transform=transforms.ToTensor()),
+    test_loader = torch.utils.data.DataLoader(datasets.STL10('./stl10', split="test", download=True,
+                                                                transform=transforms.ToTensor()),
                                               batch_size=Constant.test_batch_size, shuffle=False)
     return train_loader, test_loader
 
@@ -393,10 +394,10 @@ def test_ensemble(net: BayesianNetwork, test_loader: torch.utils.data.DataLoader
 
     for index, num in enumerate(corrects):
         if index < Constant.num_networks:
-            print(f"Network {index}'s accuracy: {num/test_size}")
+            print(f"Network {index}'s accuracy: {num / test_size}")
         else:
-            print(f"Network using the mean weight's accuracy: {num/test_size}")
-    print(f'Ensemble Accuracy: {correct/test_size}')
+            print(f"Network using the mean weight's accuracy: {num / test_size}")
+            print(f'Ensemble Accuracy: {correct / test_size}')
 
 
 def show(img) -> None:
@@ -420,7 +421,7 @@ def fuse_masks(grad_cam, guided_backprop):
 
 
 def ensemble_saliency(image, net, n_sample=5):
-    grad_cam = GradCam(net, ["relu2"])
+    grad_cam = GradCam(net, ["relu3"])
     grad_masks = [grad_cam(image) for _ in range(n_sample)]
 
     guided_backprop = GuidedBackpropReLUModel(net)
@@ -442,15 +443,16 @@ def ensemble_saliency(image, net, n_sample=5):
 
 
 def main() -> None:
+    torch.cuda.empty_cache()
     # Load data
     train_loader, test_loader = load_data()
 
-    """# Initialize a network
+    # Initialize a network
     net = BayesianNetwork().to(Constant.device)
 
     # Train the network on the training set
     net = training_procedure(net, train_loader)
-    joblib.dump(net, "save_network.pickle", protocol=4)"""
+    joblib.dump(net, "save_network.pickle", protocol=4)
     net = joblib.load("save_network.pickle")
 
     # Test the network on the test set
