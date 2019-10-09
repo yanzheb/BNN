@@ -16,6 +16,7 @@ import torch.nn as nn
 from grad_cam import GradCam, GuidedBackpropReLUModel
 from constants import Constant, DistConstant
 import joblib
+from dataset import get_dataset
 
 
 class Gaussian:
@@ -211,52 +212,54 @@ class BayesianLinear(torch.nn.Module):
 class BayesianNetwork(torch.nn.Module):
     def __init__(self):
         super(BayesianNetwork, self).__init__()
-        self.conv1 = BayesianConvolution(3, 64, 3)
+        self.conv1 = BayesianConvolution(3, 32, 3)
         self.relu1 = nn.ReLU()
         self.pool1 = nn.MaxPool2d(2, 2)
 
-        self.conv2 = BayesianConvolution(64, 128, 3)
+        self.conv2 = BayesianConvolution(32, 64, 3)
         self.relu2 = nn.ReLU()
         self.pool2 = nn.MaxPool2d(2, 2)
 
-        self.conv3 = BayesianConvolution(128, 256, 3)
+        self.conv3 = BayesianConvolution(64, 128, 3)
         self.relu3 = nn.ReLU()
         self.pool3 = nn.MaxPool2d(2, 2)
 
-        self.fc1 = BayesianLinear(25600, 1024)
+        self.conv4 = BayesianConvolution(128, 256, 3)
         self.relu4 = nn.ReLU()
+        self.pool4 = nn.MaxPool2d(2, 2)
 
-        self.fc2 = BayesianLinear(1024, 1024)
+        self.conv5 = BayesianConvolution(256, 512, 3)
         self.relu5 = nn.ReLU()
+        self.pool5 = nn.MaxPool2d(2, 2)
 
-        self.fc3 = BayesianLinear(1024, 512)
+        self.fc1 = BayesianLinear(512, 128)
         self.relu6 = nn.ReLU()
 
-        self.fc4 = BayesianLinear(512, 10)
+        self.fc2 = BayesianLinear(128, 10)
 
     def forward(self, _input, sample=False):
         """Propagate the input through the network."""
         _input = self.pool1(self.relu1(self.conv1(_input, sample)))
         _input = self.pool2(self.relu2(self.conv2(_input, sample)))
         _input = self.pool3(self.relu3(self.conv3(_input, sample)))
+        _input = self.pool4(self.relu4(self.conv4(_input, sample)))
+        _input = self.pool5(self.relu5(self.conv5(_input, sample)))
 
         _input = _input.view(_input.shape[0], -1)
-        _input = self.relu4(self.fc1(_input, sample))
-        _input = self.relu5(self.fc2(_input, sample))
-        _input = self.relu6(self.fc3(_input, sample))
-        _input = F.log_softmax(self.fc4(_input, sample), dim=1)
+        _input = self.relu6(self.fc1(_input, sample))
+        _input = F.log_softmax(self.fc2(_input, sample), dim=1)
         return _input
 
     def log_prior(self):
         """Return the summed log prior probabilities from all layers."""
-        return self.conv1.log_prior + self.conv2.log_prior + \
-               self.fc1.log_prior + self.fc2.log_prior + self.fc3.log_prior
+        return self.conv1.log_prior + self.conv2.log_prior + self.conv3.log_prior + self.conv4.log_prior + \
+               self.conv5.log_prior + self.fc1.log_prior + self.fc2.log_prior
 
     def log_variational_posterior(self):
         """Return the summed log variational posterior probabilities from all layers."""
         return self.conv1.log_variational_posterior + self.conv2.log_variational_posterior + \
-               self.fc1.log_variational_posterior + self.fc2.log_variational_posterior + \
-               self.fc3.log_variational_posterior
+               self.conv3.log_variational_posterior + self.conv4.log_variational_posterior + \
+               self.conv5.log_variational_posterior + self.fc1.log_variational_posterior + self.fc2.log_variational_posterior
 
     def sample_elbo(self, input_, target, num_batches, samples=Constant.samples):
         """Sample the elbo, implementing the minibatch version presented in section 3.4 in BBB paper."""
@@ -289,7 +292,7 @@ def train(net, optimizer, train_loader):
     losses = [[], [], [], []]
     net.train()
 
-    for batch_idx, (data, target) in enumerate(train_loader):
+    for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
         # Zero the gradient buffers
         net.zero_grad()
         values = net.sample_elbo(data, target, len(train_loader))
@@ -312,10 +315,10 @@ def load_data() -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoade
     :return: A tuple where the first item is the training set, and the second is the test set.
     """
     train_loader = torch.utils.data.DataLoader(datasets.STL10('./stl10', split="train", download=True,
-                                                                 transform=transforms.ToTensor()),
+                                                                transform=transforms.ToTensor()),
                                                batch_size=Constant.batch_size, shuffle=True)
     test_loader = torch.utils.data.DataLoader(datasets.STL10('./stl10', split="test", download=True,
-                                                                transform=transforms.ToTensor()),
+                                                               transform=transforms.ToTensor()),
                                               batch_size=Constant.test_batch_size, shuffle=False)
     return train_loader, test_loader
 
@@ -352,7 +355,7 @@ def training_procedure(net: BayesianNetwork, train_loader: torch.utils.data.Data
             losses_epoch[i] += losses[i]
 
     # Make plot of the different components of the elbo
-    make_plots(losses_epoch)
+    # make_plots(losses_epoch)
 
     return net
 
@@ -421,7 +424,7 @@ def fuse_masks(grad_cam, guided_backprop):
 
 
 def ensemble_saliency(image, net, n_sample=5):
-    grad_cam = GradCam(net, ["relu3"])
+    grad_cam = GradCam(net, ["relu5"])
     grad_masks = [grad_cam(image) for _ in range(n_sample)]
 
     guided_backprop = GuidedBackpropReLUModel(net)
@@ -453,20 +456,18 @@ def main() -> None:
     # Train the network on the training set
     net = training_procedure(net, train_loader)
     joblib.dump(net, "save_network.pickle", protocol=4)
-    net = joblib.load("save_network.pickle")
+    # net = joblib.load("save_network.pickle")
 
     # Test the network on the test set
-    # test_ensemble(net, test_loader)
+    test_ensemble(net, test_loader)
 
+    return
     index = 17
     sample = next(iter(test_loader))
     explaination = ensemble_saliency(sample[0], net, 10)
-    pred = net.forward(sample[0])
 
     show(make_grid(sample[0].detach()[index]))
     show(make_grid(explaination.detach()[index]))
-    print(f"Predicted label {pred[index].max(0)[1]}")
-    print(f"True label {sample[1][index]}")
 
 
 if __name__ == '__main__':
