@@ -1,19 +1,15 @@
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from torchvision import transforms
 import os
+import torch
 from PIL import Image
+from constants import Constant
 
-train_dir = 'dogcat/train'
-test_dir = 'dogcat/test'
+train_dir = 'dogcat'
 train_files = os.listdir(train_dir)
-test_files = os.listdir(test_dir)
 
 data_transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.ColorJitter(),
-    transforms.RandomCrop(224),
-    transforms.RandomHorizontalFlip(),
-    transforms.Resize(128),
+    transforms.Resize((256, 256)),
     transforms.ToTensor()
 ])
 
@@ -45,17 +41,20 @@ class CatDogDataset(Dataset):
             return img.astype('float32'), self.file_list[idx]
 
 
-def get_dataset(batch_size, mode="train"):
-    if mode == "train":
-        cat_files = [tf for tf in train_files if 'cat' in tf]
-        dog_files = [tf for tf in train_files if 'dog' in tf]
+def get_dataset(batch_size, test_batch_size):
+    cat_files = [tf for tf in train_files if 'cat' in tf]
+    dog_files = [tf for tf in train_files if 'dog' in tf]
 
-        cats = CatDogDataset(cat_files, train_dir, transform=data_transform)
-        dogs = CatDogDataset(dog_files, train_dir, transform=data_transform)
+    cats = CatDogDataset(cat_files, train_dir, transform=data_transform)
+    dogs = CatDogDataset(dog_files, train_dir, transform=data_transform)
 
-        catdogs = ConcatDataset([cats, dogs])
-    else:
-        files = [tf for tf in test_files]
-        catdogs = CatDogDataset(files, test_dir, mode, data_transform)
+    catdogs = ConcatDataset([cats, dogs])
 
-    return DataLoader(catdogs, batch_size=batch_size, shuffle=True)
+    torch.manual_seed(Constant.random_seed)
+    full_size = len(train_files)
+    train_size = int(0.9 * full_size)
+    test_size = full_size - train_size
+    train, test = torch.utils.data.random_split(catdogs, [train_size, test_size])
+    torch.manual_seed(torch.initial_seed())
+    return DataLoader(train, batch_size=batch_size, shuffle=True), DataLoader(test, batch_size=test_batch_size,
+                                                                              shuffle=False)

@@ -6,13 +6,15 @@ import math
 @dataclass
 class Constant:
     """Class for non distribution related constants."""
-    batch_size: int = 100
-    test_batch_size: int = 20
-    classes: int = 10
-    train_epochs: int = 1000
+    batch_size: int = 250
+    test_batch_size: int = 1
+    classes: int = 2
+    train_epochs: int = 80
     samples: int = 1
     num_networks: int = 5
+    save_period: int = 10
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    random_seed: int = 0
 
 
 @dataclass

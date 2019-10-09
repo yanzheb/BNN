@@ -8,6 +8,7 @@ from constants import Constant
 from skimage.transform import resize
 import torch.nn as nn
 
+sample = True
 
 class FeatureExtractor:
     def __init__(self, model, target_layers):
@@ -27,7 +28,7 @@ class FeatureExtractor:
                 input_ = input_.view(input_.shape[0], -1)
             # Sample weights
             if "conv" in name.lower() or "fc" in name.lower():
-                input_ = module(input_, sample=True)
+                input_ = module(input_, sample=sample)
             else:
                 input_ = module(input_)
 
@@ -44,10 +45,10 @@ class GradCam:
         self.model = model
         self.extractor = FeatureExtractor(model, target_layers)
 
-    def __call__(self, input_):
+    def __call__(self, input_, target):
         input_size = input_.shape
         target_activations, output = self.extractor(input_)
-        index = np.argmax(output.cpu().detach().numpy(), axis=1)
+        index = target.cpu().numpy()  # np.argmax(output.cpu().detach().numpy(), axis=1)
 
         one_hot = np.zeros(output.size(), dtype=np.float32)
         for sample in range(one_hot.shape[0]):
@@ -123,13 +124,14 @@ class GuidedBackpropReLUModel:
                 setattr(model, name, GuidedBackpropReLU())
 
     def forward(self, input_):
-        return self.model(input_, sample=True)
+        return self.model(input_, sample=sample)
 
-    def __call__(self, input_):
+    def __call__(self, input_, target):
         input_.requires_grad = True
 
         output = self.forward(input_)
-        index = np.argmax(output.cpu().detach().numpy(), axis=1)
+
+        index = target.cpu().numpy()  # np.argmax(output.cpu().detach().numpy(), axis=1)
 
         one_hot = np.zeros(output.size(), dtype=np.float32)
         for sample in range(one_hot.shape[0]):
